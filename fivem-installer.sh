@@ -145,34 +145,35 @@ else
       cp -r /opt/fivem/server-data /opt/fivem_backup/
       echo -e "${GREEN}Server-Daten wurden gesichert nach /opt/fivem_backup/server-data${NC}"
     fi
+    
+    # Sichere TxAdmin-Daten
+    if [ -d "/opt/fivem/txData" ]; then
+      mkdir -p /opt/fivem_backup
+      cp -r /opt/fivem/txData /opt/fivem_backup/
+      echo -e "${GREEN}TxAdmin-Daten wurden gesichert nach /opt/fivem_backup/txData${NC}"
+    fi
   else
     mkdir -p /opt/fivem
   fi
   
   cd /opt/fivem
-  # Entferne alte FiveM-Dateien, aber behalte server-data
-  find . -maxdepth 1 -not -name "server-data" -not -name "." -not -name ".." -exec rm -rf {} \;
+  # Entferne alte FiveM-Dateien, aber behalte server-data und txData
+  find . -maxdepth 1 -not -name "server-data" -not -name "txData" -not -name "." -not -name ".." -exec rm -rf {} \;
   echo -e "${GREEN}Alte FiveM-Dateien wurden entfernt.${NC}"
 fi
 
 # Aktuelle FiveM-Version herunterladen
-echo -e "${YELLOW}Neueste FiveM-Version wird heruntergeladen...${NC}"
-# Direkt die neueste stabile Version verwenden, anstatt zu versuchen, die neueste zu finden
-echo -e "${GREEN}Verwende die neueste stabile Version von FiveM...${NC}"
-wget -q --show-progress "https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/latest/fx.tar.xz" -O fx.tar.xz
+echo -e "${YELLOW}FiveM wird heruntergeladen...${NC}"
+# Feste URL für eine bekannte stabile Version
+FIVEM_DOWNLOAD_URL="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/6683-9729577be50de537692c3a19e86365a5e0f99a54/fx.tar.xz"
+echo -e "${GREEN}Verwende stabile FiveM-Version...${NC}"
+wget -q --show-progress "${FIVEM_DOWNLOAD_URL}" -O fx.tar.xz
 
 # Überprüfen, ob der Download erfolgreich war
 if [ $? -ne 0 ] || [ ! -s fx.tar.xz ]; then
   echo -e "${RED}Fehler beim Herunterladen der FiveM-Version.${NC}"
-  echo -e "${YELLOW}Versuche alternative Download-Methode...${NC}"
-  # Fallback auf bekannte stabile Version
-  wget -q --show-progress "https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/6683-9729577be50de537692c3a19e86365a5e0f99a54/fx.tar.xz" -O fx.tar.xz
-  
-  # Erneut überprüfen
-  if [ $? -ne 0 ] || [ ! -s fx.tar.xz ]; then
-    echo -e "${RED}Fehler beim Herunterladen der FiveM-Version. Bitte überprüfen Sie Ihre Internetverbindung oder versuchen Sie es später erneut.${NC}"
-    exit 1
-  fi
+  echo -e "${RED}Bitte überprüfen Sie Ihre Internetverbindung oder versuchen Sie es später erneut.${NC}"
+  exit 1
 fi
 
 echo -e "${GREEN}Entpacke FiveM...${NC}"
@@ -243,6 +244,13 @@ EOL
     systemctl enable fivem.service
   fi
   
+  # Stelle gesicherte TxAdmin-Daten wieder her
+  if [ -d "/opt/fivem_backup/txData" ] && [ ! -d "/opt/fivem/txData" ]; then
+    echo -e "${YELLOW}Stelle TxAdmin-Daten wieder her...${NC}"
+    cp -r /opt/fivem_backup/txData /opt/fivem/
+    echo -e "${GREEN}TxAdmin-Daten wurden wiederhergestellt.${NC}"
+  fi
+  
   echo -e "\n${GREEN}[3/3] Update abgeschlossen...${NC}"
 fi
 
@@ -250,31 +258,44 @@ fi
 echo -e "\n${GREEN}FiveM Server wird gestartet...${NC}"
 systemctl start fivem.service
 
+# IP-Adresse abrufen
+SERVER_IP=$(hostname -I | cut -d' ' -f1)
+
 # Warte auf TxAdmin-Pin
-echo -e "${YELLOW}Warte auf TxAdmin-Initialisierung und Pin-Generierung...${NC}"
-sleep 10
+echo -e "${YELLOW}Warte auf TxAdmin-Initialisierung...${NC}"
+sleep 15
 
 # Versuche, den TxAdmin-Pin aus den Logs zu extrahieren
 TXADMIN_PIN=""
-ATTEMPTS=0
-MAX_ATTEMPTS=12  # 2 Minuten (12 * 10 Sekunden)
 
-while [ -z "$TXADMIN_PIN" ] && [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
-  ATTEMPTS=$((ATTEMPTS+1))
-  echo -e "${YELLOW}Suche nach TxAdmin-Pin (Versuch $ATTEMPTS/$MAX_ATTEMPTS)...${NC}"
+# Prüfe, ob TxAdmin bereits eingerichtet ist (kein Pin erforderlich)
+if [ -f "/opt/fivem/txData/default/config.json" ]; then
+  echo -e "${GREEN}TxAdmin ist bereits konfiguriert, kein neuer PIN erforderlich.${NC}"
+  TXADMIN_CONFIGURED=true
+else
+  TXADMIN_CONFIGURED=false
+  
+  echo -e "${YELLOW}Suche nach TxAdmin-Pin in den Logs...${NC}"
   
   # Versuche, den Pin aus den Logs zu extrahieren
   if [ -f "/opt/fivem/txData/default/logs/admin.log" ]; then
     TXADMIN_PIN=$(grep -o "PIN: [0-9]\{4\}" /opt/fivem/txData/default/logs/admin.log | tail -1 | cut -d' ' -f2)
   fi
   
+  # Wenn kein Pin gefunden wurde, versuche es mit einem anderen Ansatz
   if [ -z "$TXADMIN_PIN" ]; then
-    sleep 10
+    echo -e "${YELLOW}Überprüfe Server-Logs nach PIN...${NC}"
+    if [ -f "/opt/fivem/server.log" ]; then
+      TXADMIN_PIN=$(grep -o "PIN: [0-9]\{4\}" /opt/fivem/server.log | tail -1 | cut -d' ' -f2)
+    fi
   fi
-done
-
-# IP-Adresse abrufen
-SERVER_IP=$(hostname -I | cut -d' ' -f1)
+  
+  # Wenn immer noch kein Pin gefunden wurde, versuche es mit einem anderen Ansatz
+  if [ -z "$TXADMIN_PIN" ]; then
+    echo -e "${YELLOW}Überprüfe alle Log-Dateien nach PIN...${NC}"
+    TXADMIN_PIN=$(find /opt/fivem -type f -name "*.log" -exec grep -l "PIN: [0-9]\{4\}" {} \; | xargs grep -o "PIN: [0-9]\{4\}" | tail -1 | cut -d' ' -f2)
+  fi
+fi
 
 # Zusammenfassung anzeigen
 echo -e "\n${GREEN}Vorgang abgeschlossen!${NC}"
@@ -282,11 +303,16 @@ echo -e "\n${YELLOW}Zugriffsdaten:${NC}"
 
 if [ "$action_choice" -eq "1" ]; then
   echo -e "  - TxAdmin: http://${SERVER_IP}:40120"
-  if [ -n "$TXADMIN_PIN" ]; then
+  if [ "$TXADMIN_CONFIGURED" = true ]; then
+    echo -e "  - TxAdmin ist bereits konfiguriert. Verwenden Sie Ihre bestehenden Anmeldedaten."
+  elif [ -n "$TXADMIN_PIN" ]; then
     echo -e "  - TxAdmin PIN: ${TXADMIN_PIN}"
   else
     echo -e "  - TxAdmin PIN: ${RED}Konnte nicht automatisch ermittelt werden.${NC}"
-    echo -e "    Bitte überprüfen Sie die Logs mit: ${YELLOW}cat /opt/fivem/txData/default/logs/admin.log | grep PIN${NC}"
+    echo -e "    Bitte überprüfen Sie die Logs mit einem der folgenden Befehle:"
+    echo -e "    ${YELLOW}cat /opt/fivem/txData/default/logs/admin.log | grep PIN${NC}"
+    echo -e "    ${YELLOW}cat /opt/fivem/server.log | grep PIN${NC}"
+    echo -e "    ${YELLOW}find /opt/fivem -type f -name \"*.log\" -exec grep -l \"PIN:\" {} \\; | xargs cat | grep PIN${NC}"
   fi
   echo -e "  - phpMyAdmin: http://${SERVER_IP}/phpmyadmin"
   echo -e "  - MySQL/MariaDB:"
@@ -294,8 +320,14 @@ if [ "$action_choice" -eq "1" ]; then
   echo -e "    * Passwort: ${MYSQL_ROOT_PASSWORD}"
 else
   echo -e "  - TxAdmin: http://${SERVER_IP}:40120"
-  if [ -n "$TXADMIN_PIN" ]; then
+  if [ "$TXADMIN_CONFIGURED" = true ]; then
+    echo -e "  - TxAdmin ist bereits konfiguriert. Verwenden Sie Ihre bestehenden Anmeldedaten."
+  elif [ -n "$TXADMIN_PIN" ]; then
     echo -e "  - TxAdmin PIN: ${TXADMIN_PIN} (falls TxAdmin neu initialisiert wurde)"
+  else
+    echo -e "  - Falls TxAdmin neu initialisiert wurde, überprüfen Sie die Logs nach dem PIN:"
+    echo -e "    ${YELLOW}cat /opt/fivem/txData/default/logs/admin.log | grep PIN${NC}"
+    echo -e "    ${YELLOW}cat /opt/fivem/server.log | grep PIN${NC}"
   fi
   echo -e "  - FiveM wurde erfolgreich aktualisiert."
 fi
