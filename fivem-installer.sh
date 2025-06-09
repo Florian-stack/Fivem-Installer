@@ -1,525 +1,630 @@
 #!/bin/bash
-#
-# FiveM Server mit TxAdmin und phpMyAdmin Automatisches Installations- und Update-Script
-# Für Debian 12
-#
 
-# Farbdefinitionen
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+red="\e[0;91m"
+green="\e[0;92m"
+bold="\e[1m"
+reset="\e[0m"
 
-# Root-Rechte prüfen
 if [ "$EUID" -ne 0 ]; then
-  echo -e "${RED}Bitte führen Sie das Script als Root aus!${NC}"
-  exit 1
+	echo -e "${red}Please run as root";
+	exit 1
 fi
 
-# Prüfen, ob es sich um Debian 12 handelt
-if [ ! -f /etc/debian_version ] || ! grep -q "12" /etc/debian_version; then
-  echo -e "${RED}Dieses Script ist nur für Debian 12 konzipiert.${NC}"
-  exit 1
-fi
-
-# Funktion zum Generieren sicherer Passwörter
-generate_password() {
-  openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 12
+status(){
+  clear
+  echo -e $green$@'...'$reset
+  sleep 1
 }
 
-# Sofortige PIN-Erfassung beim FiveM-Start
-start_fivem_and_capture_pin() {
-    local pin=""
-    local pin_found=false
-    
-    echo -e "${GREEN}FiveM Server wird gestartet und PIN wird erfasst...${NC}"
-    
-    # Erstelle temporäre Datei für PIN-Erfassung
-    local temp_log="/tmp/fivem_startup_$(date +%s).log"
-    
-    # Starte FiveM im Hintergrund und leite Output in temporäre Datei
-    cd /opt/fivem
-    nohup ./run.sh +set serverProfile default +set txAdminPort 40120 > "$temp_log" 2>&1 &
-    local fivem_pid=$!
-    
-    echo -e "${YELLOW}Überwache Startup-Output für PIN...${NC}"
-    
-    # Überwache die Log-Datei in Echtzeit
-    tail -f "$temp_log" &
-    local tail_pid=$!
-    
-    # Warte auf PIN in der Log-Datei (max 30 Sekunden)
-    local counter=0
-    while [ $counter -lt 30 ] && [ $pin_found = false ]; do
-        if [ -f "$temp_log" ]; then
-            pin=$(grep -o "PIN: [0-9]\{4\}" "$temp_log" | tail -1 | cut -d' ' -f2)
-            if [ -n "$pin" ]; then
-                pin_found=true
-                echo -e "\n${GREEN}=== PIN GEFUNDEN: $pin ===${NC}"
-                break
+runCommand(){
+    COMMAND=$1
+
+    if [[ ! -z "$2" ]]; then
+      status $2
+    fi
+
+    eval $COMMAND;
+    BASH_CODE=$?
+    if [ $BASH_CODE -ne 0 ]; then
+      echo -e "${red}An error occurred:${reset} ${white}${COMMAND}${reset}${red} returned${reset} ${white}${BASH_CODE}${reset}"
+      exit ${BASH_CODE}
+    fi
+}
+
+dir=/home/FiveM
+
+update_artifacts=false
+non_interactive=false
+artifacts_version=0
+kill_txAdmin=0
+delete_dir=0
+txadmin_deployment=0
+install_phpmyadmin=0
+crontab_autostart=0
+pma_options=()
+
+function selectVersion(){
+
+    readarray -t VERSIONS <<< $(curl -s https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ | egrep -m 3 -o '[0-9].*/fx.tar.xz')
+
+    latest_recommended=$(echo "${VERSIONS[0]}" | cut -d'-' -f1)
+    latest=$(echo "${VERSIONS[2]}" | cut -d'-' -f1)
+
+    if [[ "${artifacts_version}" == "0" ]]; then
+        if [[ "${non_interactive}" == "false" ]]; then
+            status "Select a runtime version"
+            export OPTIONS=("latest version -> $latest" "latest recommended version -> $latest_recommended" "choose custom version" "do nothing")
+
+            bashSelect
+
+            case $? in
+                0 )
+                    artifacts_version="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/${VERSIONS[2]}"
+                    ;;
+                1 )
+                    artifacts_version="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/${VERSIONS[0]}"
+                    ;;
+                2 )
+                    clear
+                    read -p "Enter the download link: " artifacts_version
+                    ;;
+                3 )
+                    exit 0
+            esac
+
+            return
+        else
+            artifacts_version="latest"
+        fi
+    fi
+    if [[ "${artifacts_version}" == "latest" ]]; then
+        artifacts_version="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/${VERSIONS[2]}"
+    fi
+}
+
+function examServData() {
+
+  runCommand "mkdir -p $dir/server-data"
+
+  runCommand "git clone -q https://github.com/citizenfx/cfx-server-data.git $dir/server-data" "The server data is being downloaded"
+
+  status "Creating example server.cfg"
+
+  cat << EOF > $dir/server-data/server.cfg
+# Only change the IP if you're using a server with multiple network interfaces, otherwise change the port only.
+endpoint_add_tcp "0.0.0.0:30120"
+endpoint_add_udp "0.0.0.0:30120"
+
+# These resources will start by default.
+ensure mapmanager
+ensure chat
+ensure spawnmanager
+ensure sessionmanager
+ensure basic-gamemode
+ensure hardcap
+ensure rconlog
+
+# This allows players to use scripthook-based plugins such as the legacy Lambda Menu.
+# Set this to 1 to allow scripthook. Do note that this does _not_ guarantee players won't be able to use external plugins.
+sv_scriptHookAllowed 0
+
+# Uncomment this and set a password to enable RCON. Make sure to change the password - it should look like set rcon_password "YOURPASSWORD"
+#set rcon_password ""
+
+# A comma-separated list of tags for your server.
+# For example:
+# - sets tags "drifting, cars, racing"
+# Or:
+# - sets tags "roleplay, military, tanks"
+sets tags "default"
+
+# A valid locale identifier for your server's primary language.
+# For example "en-US", "fr-CA", "nl-NL", "de-DE", "en-GB", "pt-BR"
+sets locale "root-AQ" 
+# please DO replace root-AQ on the line ABOVE with a real language! :)
+
+# Set an optional server info and connecting banner image url.
+# Size doesn't matter, any banner sized image will be fine.
+#sets banner_detail "https://url.to/image.png"
+#sets banner_connecting "https://url.to/image.png"
+
+# Set your server's hostname. This is not usually shown anywhere in listings.
+sv_hostname "FXServer, but unconfigured"
+
+# Set your server's Project Name
+sets sv_projectName "My FXServer Project"
+
+# Set your server's Project Description
+sets sv_projectDesc "Default FXServer requiring configuration"
+
+# Set Game Build (https://docs.fivem.net/docs/server-manual/server-commands/#sv_enforcegamebuild-build)
+#sv_enforceGameBuild 2802
+
+# Nested configs!
+#exec server_internal.cfg
+
+# Loading a server icon (96x96 PNG file)
+#load_server_icon myLogo.png
+
+# convars which can be used in scripts
+set temp_convar "hey world!"
+
+# Remove the `#` from the below line if you want your server to be listed as 'private' in the server browser.
+# Do not edit it if you *do not* want your server listed as 'private'.
+# Check the following url for more detailed information about this:
+# https://docs.fivem.net/docs/server-manual/server-commands/#sv_master1-newvalue
+#sv_master1 ""
+
+# Add system admins
+add_ace group.admin command allow # allow all commands
+add_ace group.admin command.quit deny # but don't allow quit
+add_principal identifier.fivem:1 group.admin # add the admin to the group
+
+# enable OneSync (required for server-side state awareness)
+set onesync on
+
+# Server player slot limit (see https://fivem.net/server-hosting for limits)
+sv_maxclients 48
+
+# Steam Web API key, if you want to use Steam authentication (https://steamcommunity.com/dev/apikey)
+# -> replace "" with the key
+set steam_webApiKey ""
+
+# License key for your server (https://portal.cfx.re)
+sv_licenseKey changeme
+EOF
+
+}
+
+function checkPort(){
+    lsof -i :40120
+    if [[ $( echo $? ) == 0 ]]; then
+        if [[ "${non_interactive}" == "false" ]]; then
+            if [[ "${kill_txAdmin}" == "0" ]]; then
+                status "It looks like there already is something running on the default TxAdmin port. Can we stop/kill it?" "/"
+                export OPTIONS=("Kill PID on port 40120" "Exit the script")
+                bashSelect
+
+                case $? in
+                    0 )
+                        kill_txAdmin="true"
+                        ;;
+                    1 )
+                        exit 0
+                        ;;
+                esac
             fi
         fi
-        sleep 1
-        ((counter++))
-        echo -n "."
-    done
-    
-    # Stoppe tail-Prozess
-    kill $tail_pid 2>/dev/null
-    
-    if [ $pin_found = true ]; then
-        # Stoppe den manuell gestarteten Prozess
-        kill $fivem_pid 2>/dev/null
+        if [[ "${kill_txAdmin}" == "true" ]]; then
+            status "killing PID on 40120"
+            runCommand "apt -y install psmisc"
+            runCommand "fuser -4 40120/tcp -k"
+            return
+        fi
+
+        echo -e "${red}Error:${reset} It looks like there already is something running on the default TxAdmin port."
+        exit 1
+    fi
+}
+
+function checkDir(){
+    if [[ -e $dir ]]; then
+        if [[ "${non_interactive}" == "false" ]]; then
+            if [[ "${delete_dir}" == "0" ]]; then
+                status "It looks like there already is a $dir directory. Can we remove it?" "/"
+                export OPTIONS=("Remove everything in $dir" "Exit the script ")
+                bashSelect
+                case $? in
+                    0 )
+                    delete_dir="true"
+                    ;;
+                    1 )
+                    exit 0
+                    ;;
+                esac
+            fi
+        fi
+        if [[ "${delete_dir}" == "true" ]]; then
+            status "Deleting $dir"
+            runCommand "rm -r $dir"
+            return
+        fi
+
+        echo -e "${red}Error:${reset} It looks like there already is a $dir directory."
+        exit 1
+    fi
+}
+
+
+function selectDeployment(){
+    if [[ "${txadmin_deployment}" == "0" ]]; then
+        txadmin_deployment="true"
+
+        if [[ "${non_interactive}" == "false" ]]; then
+            status "Select deployment type"
+            export OPTIONS=("Install template via TxAdmin" "Use the cfx-server-data" "do nothing")
+            bashSelect
+
+            case $? in
+                0 )
+                    txadmin_deployment="true"
+                    ;;
+                1 )
+                    txadmin_deployment="false"
+                    ;;
+                2 )
+                    exit 0
+            esac
+        fi
+    fi
+    if [[ "${txadmin_deployment}" == "false" ]]; then
+        examServData
+    fi
+}
+
+function createCrontab(){
+    if [[ "${crontab_autostart}" == "0" ]]; then
+        crontab_autostart="false"
+
+        if [[ "${non_interactive}" == "false" ]]; then
+            status "Create crontab to autostart txadmin (recommended)"
+            export OPTIONS=("yes" "no")
+            bashSelect
+
+            if [[ $? == 0 ]]; then
+                crontab_autostart="true"
+            fi
+        fi
+    fi
+    if [[ "${crontab_autostart}" == "true" ]]; then
+        status "Create crontab entry"
+        runCommand "echo \"@reboot          root    /bin/bash /home/FiveM/start.sh\" > /etc/cron.d/fivem"
+    fi
+}
+
+function installPma(){
+    if [[ "${non_interactive}" == "false" ]]; then
+        if [[ "${install_phpmyadmin}" == "0" ]]; then
+            status "Install MariaDB/MySQL and phpmyadmin"
+
+            export OPTIONS=("yes" "no")
+
+            bashSelect
+
+            case $? in
+                0 )
+                    install_phpmyadmin="true"
+                    ;;
+                1 )
+                    install_phpmyadmin="false"
+                    ;;
+            esac
+        fi
+    fi
+    if [[ "${install_phpmyadmin}" == "true" ]]; then
+        runCommand "bash <(curl -s https://raw.githubusercontent.com/JulianGransee/PHPMyAdminInstaller/main/install.sh) -s ${pma_options[*]}"
+    fi
+}
+
+function install(){
+    runCommand "apt update -y" "updating"
+    runCommand "apt install -y wget git curl dos2unix net-tools sed screen xz-utils lsof" "installing necessary packages"
+
+    checkPort
+    checkDir
+    selectDeployment
+    selectVersion
+    createCrontab
+    installPma
+
+
+    runCommand "mkdir -p $dir/server" "Create directories for the FiveM server"
+    runCommand "cd $dir/server/"
+
+
+    runCommand "wget $artifacts_version" "FxServer is getting downloaded"
+
+    runCommand "tar xf fx.tar.xz" "unpacking FxServer archive"
+    runCommand "rm fx.tar.xz"
+
+    status "Creating start, stop and access script"
+    cat << EOF > $dir/start.sh
+#!/bin/bash
+red="\e[0;91m"
+green="\e[0;92m"
+bold="\e[1m"
+reset="\e[0m"
+port=\$(lsof -Pi :40120 -sTCP:LISTEN -t)
+if [ -z "\$port" ]; then
+    screen -dmS fivem sh $dir/server/run.sh
+    echo -e "\n\${green}TxAdmin was started!\${reset}"
+else
+    echo -e "\n\${red}The default \${reset}\${bold}TxAdmin\${reset}\${red} is already in use -> Is a \${reset}\${bold}FiveM Server\${reset}\${red} already started?\${reset}"
+fi
+EOF
+    runCommand "chmod +x $dir/start.sh"
+
+    runCommand "echo \"screen -xS fivem\" > $dir/attach.sh"
+    runCommand "chmod +x $dir/attach.sh"
+
+    runCommand "echo \"screen -XS fivem quit\" > $dir/stop.sh"
+    runCommand "chmod +x $dir/stop.sh"
+
+
+    port=$(lsof -Pi :40120 -sTCP:LISTEN -t)
+
+    if [[ -z "$port" ]]; then
+
+        if [[ -e '/tmp/fivem.log' ]]; then
+        rm /tmp/fivem.log
+        fi
+        screen -L -Logfile /tmp/fivem.log -dmS fivem $dir/server/run.sh
+
         sleep 2
-        
-        # Starte jetzt den systemd-Service normal
-        systemctl start fivem.service
-        
-        # Gib PIN zurück
-        echo "$pin"
-        
-        # Räume temporäre Datei auf
-        rm -f "$temp_log"
-        return 0
-    else
-        echo -e "\n${RED}PIN nicht innerhalb von 30 Sekunden gefunden!${NC}"
-        # Räume auf
-        kill $fivem_pid 2>/dev/null
-        rm -f "$temp_log"
-        return 1
-    fi
-}
 
-# Alternative Methode: PIN direkt aus der Service-Ausgabe abfangen
-start_fivem_with_direct_capture() {
-    echo -e "${GREEN}FiveM Server wird gestartet...${NC}"
-    
-    # Starte Service und erfasse Output
-    systemctl start fivem.service
-    
-    # Erfasse Service-Output sofort
-    echo -e "${YELLOW}Erfasse Service-Output...${NC}"
-    
-    # Warte kurz und erfasse dann die Logs
-    sleep 3
-    
-    # Hole die neuesten Logs vom Service
-    local pin=$(journalctl -u fivem.service --since "30 seconds ago" --no-pager | grep -o "PIN: [0-9]\{4\}" | tail -1 | cut -d' ' -f2)
-    
-    if [ -n "$pin" ]; then
-        echo -e "${GREEN}PIN erfolgreich erfasst: $pin${NC}"
-        echo "$pin"
-        return 0
-    else
-        # Fallback: Live-Monitoring für 15 Sekunden
-        echo -e "${YELLOW}Fallback: Live-Monitoring für 15 Sekunden...${NC}"
-        
-        timeout 15 journalctl -u fivem.service -f --no-pager | while read -r line; do
-            if echo "$line" | grep -q "PIN:"; then
-                local found_pin=$(echo "$line" | grep -o "PIN: [0-9]\{4\}" | cut -d' ' -f2)
-                if [ -n "$found_pin" ]; then
-                    echo "$found_pin" > /tmp/txadmin_pin.txt
-                    echo -e "\n${GREEN}PIN gefunden: $found_pin${NC}"
-                    break
-                fi
+        line_counter=0
+        while true; do
+        while read -r line; do
+            echo $line
+            if [[ "$line" == *"able to access"* ]]; then
+            break 2
             fi
+        done < /tmp/fivem.log
+        sleep 1
         done
-        
-        # Lese PIN aus temporärer Datei
-        if [ -f "/tmp/txadmin_pin.txt" ]; then
-            pin=$(cat /tmp/txadmin_pin.txt)
-            rm -f /tmp/txadmin_pin.txt
-            echo "$pin"
-            return 0
+
+        cat -v /tmp/fivem.log > /tmp/fivem.log.tmp
+
+        while read -r line; do
+        echo $line_counter
+        if [[ "$line" == *"PIN"*  ]]; then
+            let "line_counter += 2"
+            break 2
         fi
-        
-        return 1
-    fi
-}
+        let "line_counter += 1"
+        done < /tmp/fivem.log.tmp
 
-# Hauptfunktion für PIN-Erfassung
-capture_txadmin_pin() {
-    # Prüfe, ob TxAdmin bereits konfiguriert ist
-    if [ -f "/opt/fivem/txData/default/config.json" ]; then
-        echo -e "${GREEN}TxAdmin ist bereits konfiguriert.${NC}"
-        return 2
-    fi
-    
-    echo -e "${BLUE}Starte PIN-Erfassung...${NC}"
-    
-    # Versuche erste Methode
-    local pin=$(start_fivem_with_direct_capture)
-    
-    if [ -n "$pin" ]; then
-        echo "$pin"
-        return 0
-    fi
-    
-    echo -e "${YELLOW}Erste Methode fehlgeschlagen, versuche alternative Methode...${NC}"
-    
-    # Stoppe Service für sauberen Neustart
-    systemctl stop fivem.service 2>/dev/null
-    sleep 2
-    
-    # Versuche zweite Methode
-    pin=$(start_fivem_and_capture_pin)
-    
-    if [ -n "$pin" ]; then
-        echo "$pin"
-        return 0
-    fi
-    
-    return 1
-}
+        pin_line=$( head -n $line_counter /tmp/fivem.log | tail -n +$line_counter )
+        echo $line_counter
+        echo $pin_line > /tmp/fivem.log.tmp
+        pin=$( cat -v /tmp/fivem.log.tmp | sed --regexp-extended --expression='s/\^\[\[([0-9][0-9][a-z])|([0-9][a-z])|(\^\[\[)|(\[.*\])|(M-bM-\^TM-\^C)|(\^M)//g' )
+        pin=$( echo $pin | sed --regexp-extend --expression='s/[\ ]//g' )
 
-# Sofortige PIN-Anzeige-Funktion (für manuelle Verwendung)
-show_pin_immediately() {
-    echo -e "${BLUE}=== SOFORTIGE PIN-ERFASSUNG ===${NC}"
-    echo -e "${YELLOW}Stoppe FiveM-Service...${NC}"
-    systemctl stop fivem.service
-    
-    echo -e "${YELLOW}Starte FiveM manuell für PIN-Erfassung...${NC}"
-    cd /opt/fivem
-    
-    # Starte FiveM und zeige Output direkt an
-    timeout 30 ./run.sh +set serverProfile default +set txAdminPort 40120 | tee /tmp/fivem_direct.log &
-    
-    # Überwache Output in Echtzeit
-    tail -f /tmp/fivem_direct.log | while read -r line; do
-        echo "$line"
-        if echo "$line" | grep -q "PIN:"; then
-            PIN=$(echo "$line" | grep -o "PIN: [0-9]\{4\}" | cut -d' ' -f2)
-            echo -e "\n${GREEN}=== IHR PIN: $PIN ===${NC}\n"
-            echo "PIN: $PIN" > /root/txadmin_pin.txt
-            killall run.sh 2>/dev/null
-            break
+        echo $pin
+        rm /tmp/fivem.log.tmp
+        clear
+
+        echo -e "\n${green}${bold}TxAdmin${reset}${green} was started successfully${reset}"
+        txadmin="http://$(ip route get 1.1.1.1 | awk '{print $7; exit}'):40120"
+        echo -e "\n\n${red}${uline}Commands just usable via SSH\n"
+        echo -e "${red}To ${reset}${blue}start${reset}${red} TxAdmin run -> ${reset}${bold}sh $dir/start.sh${reset} ${red}!\n"
+        echo -e "${red}To ${reset}${blue}stop${reset}${red} TxAdmin run -> ${reset}${bold}sh $dir/stop.sh${reset} ${red}!\n"
+        echo -e "${red}To see the ${reset}${blue}\"Live Console\"${reset}${red} run -> ${reset}${bold}sh $dir/attach.sh${reset} ${red}!\n"
+
+        echo -e "\n${green}TxAdmin Webinterface: ${reset}${blue}${txadmin}\n"
+
+        echo -e "${green}Pin: ${reset}${blue}${pin:(-4)}${reset}${green} (use it in the next 5 minutes!)"
+
+        echo -e "\n${green}Server-Data Path: ${reset}${blue}$dir/server-data${reset}"
+
+        if [[ "$install_phpmyadmin" == "true" ]]; then
+            echo
+            echo "MariaDB and PHPMyAdmin data:"
+            runCommand "cat /root/.mariadbPhpma"
+            runCommand "rm /root/.mariadbPhpma"
+            rootPasswordMariaDB=$( cat /root/.mariadbRoot )
+            rm /root/.mariadbRoot
+            fivempasswd=$( pwgen 32 1 );
+            mariadb -u root -p$rootPasswordMariaDB -e "CREATE DATABASE fivem;"
+            mariadb -u root -p$rootPasswordMariaDB -e "GRANT ALL PRIVILEGES ON fivem.* TO 'fivem'@'localhost' IDENTIFIED BY '${fivempasswd}';"
+            echo "
+FiveM MySQL-Data
+    User: fivem
+    Password: ${fivempasswd}
+    Database name: fivem
+    FiveM MySQL Connection-String:
+        set mysql_connection_string \"server=127.0.0.1;database=fivem;userid=fivem;password=${fivempasswd}\""
+        runCommand "cat /root/.PHPma"
         fi
-    done
-    
-    # Starte Service wieder normal
-    systemctl start fivem.service
-    rm -f /tmp/fivem_direct.log
+
+        sleep 1
+
+    else
+        echo -e "\n${red}The default ${reset}${bold}TxAdmin${reset}${red} port is already in use -> Is a ${reset}${bold}FiveM Server${reset}${red} already running?${reset}"
+    fi
 }
 
-clear
-echo -e "${BLUE}╔═══════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║                                                           ║${NC}"
-echo -e "${BLUE}║${NC}   ${GREEN}FiveM Server mit TxAdmin und phpMyAdmin - Tool${NC}         ${BLUE}║${NC}"
-echo -e "${BLUE}║                                                           ║${NC}"
-echo -e "${BLUE}╚═══════════════════════════════════════════════════════════╝${NC}"
-echo ""
-echo -e "${YELLOW}Dieses Script kann:${NC}"
-echo -e "  1) Einen neuen FiveM Server mit TxAdmin installieren"
-echo -e "  2) Einen bestehenden FiveM Server aktualisieren"
-echo ""
+function update() {
+    selectVersion
 
-# Auswahl der Aktion
-read -p "Bitte wählen Sie eine Option (1 oder 2): " action_choice
-if [[ ! "$action_choice" =~ ^[1-2]$ ]]; then
-  echo -e "${RED}Ungültige Auswahl. Das Script wird beendet.${NC}"
-  exit 1
-fi
+    if [[ "${non_interactive}" == "false" ]]; then
+        status "Select the alpine directory"
+        readarray -t directories <<<$(find / -name "alpine")
+        export OPTIONS=(${directories[*]})
 
-# Passwörter generieren
-MYSQL_ROOT_PASSWORD=$(generate_password)
-PMA_PASSWORD=$(generate_password)
-PMA_USERNAME="root"
+        bashSelect
 
-# Installation
-if [ "$action_choice" -eq "1" ]; then
-  echo -e "\n${GREEN}[1/6] System wird aktualisiert...${NC}"
-  apt update && apt upgrade -y
+        dir=${directories[$?]}/..
+    else
+        if [[ "$update_artifacts" == false ]]; then
+            echo -e "${red}Error:${reset} Directory must be specified in non-interactive mode using --update <path>."
+            exit 1
+        fi
+        dir=$update_artifacts
+    fi
 
-  echo -e "\n${GREEN}[2/6] Benötigte Pakete werden installiert...${NC}"
-  apt install -y wget git curl xz-utils screen ufw nginx mariadb-server php php-fpm php-mysql php-curl php-gd php-mbstring php-xml php-zip unzip
+    checkPort
 
-  echo -e "\n${GREEN}[3/6] MySQL/MariaDB wird konfiguriert...${NC}"
-  mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';"
-  mysql -e "FLUSH PRIVILEGES;"
-
-  echo -e "\n${GREEN}[4/6] phpMyAdmin wird installiert...${NC}"
-  mkdir -p /var/www/html/phpmyadmin
-  cd /tmp
-  # Neueste Version von phpMyAdmin herunterladen
-  wget https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.zip
-  unzip phpMyAdmin-5.2.1-all-languages.zip
-  cp -a phpMyAdmin-5.2.1-all-languages/* /var/www/html/phpmyadmin/
-  rm -rf phpMyAdmin-5.2.1-all-languages.zip phpMyAdmin-5.2.1-all-languages
-  cp /var/www/html/phpmyadmin/config.sample.inc.php /var/www/html/phpmyadmin/config.inc.php
-  BLOWFISH_SECRET=$(openssl rand -base64 32)
-  sed -i "s/\$cfg\['blowfish_secret'\] = ''/\$cfg\['blowfish_secret'\] = '${BLOWFISH_SECRET}'/" /var/www/html/phpmyadmin/config.inc.php
-  chown -R www-data:www-data /var/www/html/phpmyadmin
-
-  # Nginx für phpMyAdmin konfigurieren
-  cat > /etc/nginx/sites-available/default << EOL
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    
-    root /var/www/html;
-    index index.php index.html index.htm;
-    
-    server_name _;
-    
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
-    
-    location /phpmyadmin {
-        root /var/www/html/;
-        index index.php;
-        
-        location ~ ^/phpmyadmin/(.+\.php)\$ {
-            try_files \$uri =404;
-            fastcgi_pass unix:/var/run/php/php-fpm.sock;
-            fastcgi_index index.php;
-            fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-            include fastcgi_params;
-        }
-        
-        location ~* ^/phpmyadmin/(.+\.(jpg|jpeg|gif|css|png|js|ico|html|xml|txt))\$ {
-            root /var/www/html/;
-        }
-    }
-    
-    location ~ \.php\$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/var/run/php/php-fpm.sock;
-    }
-    
-    location ~ /\.ht {
-        deny all;
-    }
+    runCommand "rm -rf $dir/alpine" "${red}Deleting alpine"
+    runCommand "rm -f $dir/run.sh" "${red}Deleting run.sh"
+    runCommand "wget --directory-prefix=$dir $artifacts_version" "Downloading fx.tar.xz"
+    echo "${green}Success"
+    runCommand "tar xf $dir/fx.tar.xz -C $dir" "Unpacking fx.tar.xz"
+    echo "${green}Success"
+    runCommand "rm -r $dir/fx.tar.xz" "${red}Deleting fx.tar.xz"
+    clear
+    echo "${green}Update success"
+    exit 0
 }
-EOL
 
-  systemctl restart nginx
-fi
+function main(){
+    curl --version
+    if [[ $? == 127  ]]; then  apt update -y && apt -y install curl; fi
+    clear 
 
-# FiveM mit TxAdmin installieren oder aktualisieren
-if [ "$action_choice" -eq "1" ]; then
-  echo -e "\n${GREEN}[5/6] FiveM mit TxAdmin wird installiert...${NC}"
-  mkdir -p /opt/fivem
-  cd /opt/fivem
-else
-  echo -e "\n${GREEN}[1/3] FiveM mit TxAdmin wird aktualisiert...${NC}"
-  # Stoppe den FiveM-Service, falls er läuft
-  if systemctl is-active --quiet fivem.service; then
-    systemctl stop fivem.service
-    echo -e "${YELLOW}FiveM-Service wurde gestoppt für das Update.${NC}"
-  fi
-  
-  # Sichere die aktuellen Daten
-  if [ -d "/opt/fivem" ]; then
-    echo -e "${YELLOW}Sichere wichtige Daten vor dem Update...${NC}"
-    # Sichere nur die wichtigen Daten, nicht die gesamte Installation
-    if [ -d "/opt/fivem/server-data" ]; then
-      mkdir -p /opt/fivem_backup
-      cp -r /opt/fivem/server-data /opt/fivem_backup/
-      echo -e "${GREEN}Server-Daten wurden gesichert nach /opt/fivem_backup/server-data${NC}"
+    if [[ "${non_interactive}" == "false" ]]; then
+        source <(curl -s https://raw.githubusercontent.com/JulianGransee/BashSelect.sh/main/BashSelect.sh)
+        
+        if [[ "${update_artifacts}" == "false" ]]; then
+            export OPTIONS=("install FiveM" "update FiveM" "do nothing")
+            bashSelect
+
+            case $? in
+                0 )
+                    install;;
+                1 )
+                    update;;
+                2 )
+                    exit 0
+            esac
+        fi
+        exit 0
     fi
     
-    # Sichere TxAdmin-Daten
-    if [ -d "/opt/fivem/txData" ]; then
-      mkdir -p /opt/fivem_backup
-      cp -r /opt/fivem/txData /opt/fivem_backup/
-      echo -e "${GREEN}TxAdmin-Daten wurden gesichert nach /opt/fivem_backup/txData${NC}"
+    if [[ "${update_artifacts}" == "false" ]]; then
+        install
+    else
+        update
     fi
-  else
-    mkdir -p /opt/fivem
-  fi
-  
-  cd /opt/fivem
-  # Entferne alte FiveM-Dateien, aber behalte server-data und txData
-  find . -maxdepth 1 -not -name "server-data" -not -name "txData" -not -name "." -not -name ".." -exec rm -rf {} \;
-  echo -e "${GREEN}Alte FiveM-Dateien wurden entfernt.${NC}"
+}
+
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            echo -e "${bold}Usage: bash <(curl -s https://raw.githubusercontent.com/Twe3x/fivem-installer/main/setup.sh) [OPTIONS]${reset}"
+            echo "Options:"
+            echo "  -h, --help                      Display this help message."
+            echo "      --non-interactive           Skip all interactive prompts by providing all required inputs as options."
+            echo "                                  If --phpmyadmin is included, you must also choose between --simple or --security."
+            echo "                                      When using --security, you must provide both --db_user and --db_password."
+            echo "  -v, --version <URL|latest>      Choose a artifacts version."
+            echo "                                  Default: latest"
+            echo "  -u, --update <path>             Update the artifacts version and specify the directory."
+            echo "                                  Use -v or --version to specify the version or it will use the latest version."
+            echo "      --no-txadmin                Disable txAdmin deployment and use cfx-server-data."
+            echo "  -c, --crontab                   Enable or disable crontab autostart."
+            echo "      --kill-port                 Forcefully stop any process running on the TxAdmin port (40120)."
+            echo "      --delete-dir                Forcefully delete the /home/FiveM directory if it exists."
+            echo ""
+            echo "PHPMyAdminInstaller Options:"
+            echo "  -p, --phpmyadmin                Enable or disable phpMyAdmin installation."
+            echo "      --db_user <name>            Specify a database user."
+            echo "      --db_password <password>    Set a custom password for the database."
+            echo "      --generate_password         Automatically generate a secure password for the database."
+            echo "      --reset_password            Reset the database password if one already exists."
+            echo "      --remove_db                 Remove MySQL/MariaDB and reinstall it."
+            echo "      --remove_pma                Remove phpMyAdmin and reinstall it if it already exists."
+            exit 0
+            ;;
+        --non-interactive)
+            non_interactive=true
+            pma_options+=("--non-interactive")
+            shift
+            ;;
+        -v|--version)
+            artifacts_version="$2"
+            shift 2
+            ;;
+        -u|--update)
+            update_artifacts="$artifacts_version"
+            shift 2
+            ;;
+        --no-txadmin)
+            txadmin_deployment=false
+            shift
+            ;;
+        -p|--phpmyadmin)
+            install_phpmyadmin=true
+            shift
+            ;;
+        -c|--crontab)
+            crontab_autostart=true
+            shift
+            ;;
+        --kill-port)
+            kill_txAdmin=true
+            shift
+            ;;
+        --delete-dir)
+            delete_dir=true
+            shift
+            ;;
+
+        # PHPMyAdmin installer Options:
+        --security)
+            pma_options+=("--security")
+            shift
+            ;;
+        --simple)
+            pma_options+=("--simple")
+            shift
+            ;;
+        --db_user)
+            pma_options+=("--db_user $2")
+            shift 2
+            ;;
+        --db_password)
+            pma_options+=("--db_password $2")
+            shift 2
+            ;;
+        --generate_password)
+            pma_options+=("--generate_password")
+            shift
+            ;;
+        --reset_password)
+            pma_options+=("--reset_password")
+            shift
+            ;;
+        --remove_db)
+            pma_options+=("--remove_db")
+            shift
+            ;;
+        --remove_pma)
+            pma_options+=("--remove_pma")
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+if [[ "${non_interactive}" == "true" && "${install_phpmyadmin}" == "true" ]]; then
+    errors=()
+
+    if ! printf "%s\n" "${pma_options[@]}" | grep -q -- "--security" && 
+       ! printf "%s\n" "${pma_options[@]}" | grep -q -- "--simple"; then
+        errors+=("${red}Error:${reset} With --non-interactive, either --security or --simple must be set.")
+    fi
+
+    if printf "%s\n" "${pma_options[@]}" | grep -q -- "--security"; then
+        if ! printf "%s\n" "${pma_options[@]}" | grep -q -- "--db_user"; then
+            errors+=("${red}Error:${reset} With --non-interactive and --security, --db_user <user> must be set.")
+        fi
+
+        if ! printf "%s\n" "${pma_options[@]}" | grep -q -- "--db_password" && 
+           ! printf "%s\n" "${pma_options[@]}" | grep -q -- "--generate_password"; then
+            errors+=("${red}Error:${reset} With --non-interactive and --security, either --db_password <password> or --generate_password must be set.")
+        fi
+    fi
+
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        for error in "${errors[@]}"; do
+            echo -e "$error"
+        done
+        exit 1
+    fi
 fi
 
-# Aktuelle FiveM-Version herunterladen
-echo -e "${YELLOW}FiveM wird heruntergeladen...${NC}"
-# Feste URL für eine bekannte stabile Version
-FIVEM_DOWNLOAD_URL="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/6683-9729577be50de537692c3a19e86365a5e0f99a54/fx.tar.xz"
-echo -e "${GREEN}Verwende stabile FiveM-Version...${NC}"
-wget -q --show-progress "${FIVEM_DOWNLOAD_URL}" -O fx.tar.xz
-
-# Überprüfen, ob der Download erfolgreich war
-if [ $? -ne 0 ] || [ ! -s fx.tar.xz ]; then
-  echo -e "${RED}Fehler beim Herunterladen der FiveM-Version.${NC}"
-  echo -e "${RED}Bitte überprüfen Sie Ihre Internetverbindung oder versuchen Sie es später erneut.${NC}"
-  exit 1
-fi
-
-echo -e "${GREEN}Entpacke FiveM...${NC}"
-tar xf fx.tar.xz
-if [ $? -ne 0 ]; then
-  echo -e "${RED}Fehler beim Entpacken der FiveM-Version. Die heruntergeladene Datei könnte beschädigt sein.${NC}"
-  exit 1
-fi
-
-rm fx.tar.xz
-
-# TxAdmin Setup vorbereiten
-mkdir -p /opt/fivem/server-data
-
-# Nur bei Neuinstallation
-if [ "$action_choice" -eq "1" ]; then
-  # Systemd Service für FiveM erstellen
-  cat > /etc/systemd/system/fivem.service << EOL
-[Unit]
-Description=FiveM Server with TxAdmin
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/fivem
-ExecStart=/opt/fivem/run.sh +set serverProfile default +set txAdminPort 40120
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
-  systemctl daemon-reload
-  systemctl enable fivem.service
-
-  # Firewall konfigurieren
-  echo -e "\n${GREEN}[6/6] Firewall wird konfiguriert...${NC}"
-  ufw allow 22/tcp
-  ufw allow 80/tcp
-  ufw allow 30120/tcp
-  ufw allow 30120/udp
-  ufw allow 40120/tcp
-  ufw --force enable
-else
-  echo -e "\n${GREEN}[2/3] Konfiguration wird überprüft...${NC}"
-  # Stelle sicher, dass der Service korrekt konfiguriert ist
-  if [ ! -f "/etc/systemd/system/fivem.service" ]; then
-    echo -e "${YELLOW}FiveM-Service wird neu konfiguriert...${NC}"
-    cat > /etc/systemd/system/fivem.service << EOL
-[Unit]
-Description=FiveM Server with TxAdmin
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/fivem
-ExecStart=/opt/fivem/run.sh +set serverProfile default +set txAdminPort 40120
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOL
-    systemctl daemon-reload
-    systemctl enable fivem.service
-  fi
-  
-  # Stelle gesicherte TxAdmin-Daten wieder her
-  if [ -d "/opt/fivem_backup/txData" ] && [ ! -d "/opt/fivem/txData" ]; then
-    echo -e "${YELLOW}Stelle TxAdmin-Daten wieder her...${NC}"
-    cp -r /opt/fivem_backup/txData /opt/fivem/
-    echo -e "${GREEN}TxAdmin-Daten wurden wiederhergestellt.${NC}"
-  fi
-  
-  echo -e "\n${GREEN}[3/3] Update abgeschlossen...${NC}"
-fi
-
-# IP-Adresse abrufen
-SERVER_IP=$(hostname -I | cut -d' ' -f1)
-
-# PIN-Erfassung
-echo -e "\n${GREEN}Starte TxAdmin und erfasse PIN...${NC}"
-
-# Erfasse PIN
-TXADMIN_PIN_RESULT=$(capture_txadmin_pin)
-PIN_STATUS=$?
-
-case $PIN_STATUS in
-    0)
-        TXADMIN_PIN="$TXADMIN_PIN_RESULT"
-        TXADMIN_CONFIGURED=false
-        echo -e "${GREEN}PIN erfolgreich erfasst: $TXADMIN_PIN${NC}"
-        ;;
-    2)
-        TXADMIN_CONFIGURED=true
-        TXADMIN_PIN=""
-        ;;
-    *)
-        TXADMIN_CONFIGURED=false
-        TXADMIN_PIN=""
-        echo -e "${RED}PIN konnte nicht erfasst werden!${NC}"
-        echo -e "${YELLOW}Bitte starten Sie den Server manuell und suchen Sie nach dem PIN:${NC}"
-        echo -e "${BLUE}journalctl -u fivem.service -f | grep PIN${NC}"
-        ;;
-esac
-
-# Stelle sicher, dass der Service läuft
-if ! systemctl is-active --quiet fivem.service; then
-    echo -e "${YELLOW}Starte FiveM-Service...${NC}"
-    systemctl start fivem.service
-fi
-
-# Zusammenfassung anzeigen
-echo -e "\n${GREEN}Vorgang abgeschlossen!${NC}"
-echo -e "\n${YELLOW}Zugriffsdaten:${NC}"
-
-if [ "$action_choice" -eq "1" ]; then
-  echo -e "  - TxAdmin: http://${SERVER_IP}:40120"
-  if [ "$TXADMIN_CONFIGURED" = true ]; then
-    echo -e "  - TxAdmin ist bereits konfiguriert. Verwenden Sie Ihre bestehenden Anmeldedaten."
-  elif [ -n "$TXADMIN_PIN" ]; then
-    echo -e "  - TxAdmin PIN: ${TXADMIN_PIN}"
-  else
-    echo -e "  - TxAdmin PIN: ${RED}Konnte nicht automatisch ermittelt werden.${NC}"
-    echo -e "    Für sofortige PIN-Erfassung führen Sie aus:"
-    echo -e "    ${YELLOW}# Stoppe den Service und erfasse PIN sofort:${NC}"
-    echo -e "    ${BLUE}systemctl stop fivem.service && cd /opt/fivem && ./run.sh +set serverProfile default +set txAdminPort 40120${NC}"
-  fi
-  echo -e "  - phpMyAdmin: http://${SERVER_IP}/phpmyadmin"
-  echo -e "  - MySQL/MariaDB:"
-  echo -e "    * Benutzername: ${PMA_USERNAME}"
-  echo -e "    * Passwort: ${MYSQL_ROOT_PASSWORD}"
-else
-  echo -e "  - TxAdmin: http://${SERVER_IP}:40120"
-  if [ "$TXADMIN_CONFIGURED" = true ]; then
-    echo -e "  - TxAdmin ist bereits konfiguriert. Verwenden Sie Ihre bestehenden Anmeldedaten."
-  elif [ -n "$TXADMIN_PIN" ]; then
-    echo -e "  - TxAdmin PIN: ${TXADMIN_PIN} (falls TxAdmin neu initialisiert wurde)"
-  else
-    echo -e "  - Falls TxAdmin neu initialisiert wurde, für sofortigen PIN:"
-    echo -e "    ${BLUE}systemctl stop fivem.service && cd /opt/fivem && ./run.sh +set serverProfile default +set txAdminPort 40120${NC}"
-  fi
-  echo -e "  - FiveM wurde erfolgreich aktualisiert."
-fi
-
-echo ""
-echo -e "${YELLOW}Wichtige Informationen:${NC}"
-echo -e "  1. Richten Sie Ihren FiveM-Server über das TxAdmin-Panel ein."
-echo -e "  2. Der FiveM-Server läuft als Systemdienst. Verwenden Sie folgende Befehle zur Steuerung:"
-echo -e "     - Status prüfen: systemctl status fivem"
-echo -e "     - Neustarten: systemctl restart fivem"
-echo -e "     - Stoppen: systemctl stop fivem"
-echo -e "     - Starten: systemctl start fivem"
-echo -e "  3. Für sofortige PIN-Erfassung bei Problemen:"
-echo -e "     ${BLUE}systemctl stop fivem.service && cd /opt/fivem && timeout 30 ./run.sh +set serverProfile default +set txAdminPort 40120 | grep PIN${NC}"
-echo ""
-echo -e "${GREEN}Viel Spaß mit Ihrem FiveM-Server!${NC}"
-
-# Speichere die Zugangsdaten in einer Datei
-if [ "$action_choice" -eq "1" ]; then
-  echo -e "TxAdmin: http://${SERVER_IP}:40120" > /root/fivem_credentials.txt
-  if [ -n "$TXADMIN_PIN" ]; then
-    echo -e "TxAdmin PIN: ${TXADMIN_PIN}" >> /root/fivem_credentials.txt
-  fi
-  echo -e "phpMyAdmin: http://${SERVER_IP}/phpmyadmin" >> /root/fivem_credentials.txt
-  echo -e "MySQL/MariaDB Benutzername: ${PMA_USERNAME}" >> /root/fivem_credentials.txt
-  echo -e "MySQL/MariaDB Passwort: ${MYSQL_ROOT_PASSWORD}" >> /root/fivem_credentials.txt
-  echo -e "\n${GREEN}Zugangsdaten wurden in /root/fivem_credentials.txt gespeichert.${NC}"
-fi
-
-# Für sofortige PIN-Erfassung bei Bedarf entkommentieren:
-# show_pin_immediately
+main
