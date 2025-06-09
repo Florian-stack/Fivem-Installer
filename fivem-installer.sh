@@ -28,6 +28,180 @@ generate_password() {
   openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 12
 }
 
+# Sofortige PIN-Erfassung beim FiveM-Start
+start_fivem_and_capture_pin() {
+    local pin=""
+    local pin_found=false
+    
+    echo -e "${GREEN}FiveM Server wird gestartet und PIN wird erfasst...${NC}"
+    
+    # Erstelle temporäre Datei für PIN-Erfassung
+    local temp_log="/tmp/fivem_startup_$(date +%s).log"
+    
+    # Starte FiveM im Hintergrund und leite Output in temporäre Datei
+    cd /opt/fivem
+    nohup ./run.sh +set serverProfile default +set txAdminPort 40120 > "$temp_log" 2>&1 &
+    local fivem_pid=$!
+    
+    echo -e "${YELLOW}Überwache Startup-Output für PIN...${NC}"
+    
+    # Überwache die Log-Datei in Echtzeit
+    tail -f "$temp_log" &
+    local tail_pid=$!
+    
+    # Warte auf PIN in der Log-Datei (max 30 Sekunden)
+    local counter=0
+    while [ $counter -lt 30 ] && [ $pin_found = false ]; do
+        if [ -f "$temp_log" ]; then
+            pin=$(grep -o "PIN: [0-9]\{4\}" "$temp_log" | tail -1 | cut -d' ' -f2)
+            if [ -n "$pin" ]; then
+                pin_found=true
+                echo -e "\n${GREEN}=== PIN GEFUNDEN: $pin ===${NC}"
+                break
+            fi
+        fi
+        sleep 1
+        ((counter++))
+        echo -n "."
+    done
+    
+    # Stoppe tail-Prozess
+    kill $tail_pid 2>/dev/null
+    
+    if [ $pin_found = true ]; then
+        # Stoppe den manuell gestarteten Prozess
+        kill $fivem_pid 2>/dev/null
+        sleep 2
+        
+        # Starte jetzt den systemd-Service normal
+        systemctl start fivem.service
+        
+        # Gib PIN zurück
+        echo "$pin"
+        
+        # Räume temporäre Datei auf
+        rm -f "$temp_log"
+        return 0
+    else
+        echo -e "\n${RED}PIN nicht innerhalb von 30 Sekunden gefunden!${NC}"
+        # Räume auf
+        kill $fivem_pid 2>/dev/null
+        rm -f "$temp_log"
+        return 1
+    fi
+}
+
+# Alternative Methode: PIN direkt aus der Service-Ausgabe abfangen
+start_fivem_with_direct_capture() {
+    echo -e "${GREEN}FiveM Server wird gestartet...${NC}"
+    
+    # Starte Service und erfasse Output
+    systemctl start fivem.service
+    
+    # Erfasse Service-Output sofort
+    echo -e "${YELLOW}Erfasse Service-Output...${NC}"
+    
+    # Warte kurz und erfasse dann die Logs
+    sleep 3
+    
+    # Hole die neuesten Logs vom Service
+    local pin=$(journalctl -u fivem.service --since "30 seconds ago" --no-pager | grep -o "PIN: [0-9]\{4\}" | tail -1 | cut -d' ' -f2)
+    
+    if [ -n "$pin" ]; then
+        echo -e "${GREEN}PIN erfolgreich erfasst: $pin${NC}"
+        echo "$pin"
+        return 0
+    else
+        # Fallback: Live-Monitoring für 15 Sekunden
+        echo -e "${YELLOW}Fallback: Live-Monitoring für 15 Sekunden...${NC}"
+        
+        timeout 15 journalctl -u fivem.service -f --no-pager | while read -r line; do
+            if echo "$line" | grep -q "PIN:"; then
+                local found_pin=$(echo "$line" | grep -o "PIN: [0-9]\{4\}" | cut -d' ' -f2)
+                if [ -n "$found_pin" ]; then
+                    echo "$found_pin" > /tmp/txadmin_pin.txt
+                    echo -e "\n${GREEN}PIN gefunden: $found_pin${NC}"
+                    break
+                fi
+            fi
+        done
+        
+        # Lese PIN aus temporärer Datei
+        if [ -f "/tmp/txadmin_pin.txt" ]; then
+            pin=$(cat /tmp/txadmin_pin.txt)
+            rm -f /tmp/txadmin_pin.txt
+            echo "$pin"
+            return 0
+        fi
+        
+        return 1
+    fi
+}
+
+# Hauptfunktion für PIN-Erfassung
+capture_txadmin_pin() {
+    # Prüfe, ob TxAdmin bereits konfiguriert ist
+    if [ -f "/opt/fivem/txData/default/config.json" ]; then
+        echo -e "${GREEN}TxAdmin ist bereits konfiguriert.${NC}"
+        return 2
+    fi
+    
+    echo -e "${BLUE}Starte PIN-Erfassung...${NC}"
+    
+    # Versuche erste Methode
+    local pin=$(start_fivem_with_direct_capture)
+    
+    if [ -n "$pin" ]; then
+        echo "$pin"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}Erste Methode fehlgeschlagen, versuche alternative Methode...${NC}"
+    
+    # Stoppe Service für sauberen Neustart
+    systemctl stop fivem.service 2>/dev/null
+    sleep 2
+    
+    # Versuche zweite Methode
+    pin=$(start_fivem_and_capture_pin)
+    
+    if [ -n "$pin" ]; then
+        echo "$pin"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Sofortige PIN-Anzeige-Funktion (für manuelle Verwendung)
+show_pin_immediately() {
+    echo -e "${BLUE}=== SOFORTIGE PIN-ERFASSUNG ===${NC}"
+    echo -e "${YELLOW}Stoppe FiveM-Service...${NC}"
+    systemctl stop fivem.service
+    
+    echo -e "${YELLOW}Starte FiveM manuell für PIN-Erfassung...${NC}"
+    cd /opt/fivem
+    
+    # Starte FiveM und zeige Output direkt an
+    timeout 30 ./run.sh +set serverProfile default +set txAdminPort 40120 | tee /tmp/fivem_direct.log &
+    
+    # Überwache Output in Echtzeit
+    tail -f /tmp/fivem_direct.log | while read -r line; do
+        echo "$line"
+        if echo "$line" | grep -q "PIN:"; then
+            PIN=$(echo "$line" | grep -o "PIN: [0-9]\{4\}" | cut -d' ' -f2)
+            echo -e "\n${GREEN}=== IHR PIN: $PIN ===${NC}\n"
+            echo "PIN: $PIN" > /root/txadmin_pin.txt
+            killall run.sh 2>/dev/null
+            break
+        fi
+    done
+    
+    # Starte Service wieder normal
+    systemctl start fivem.service
+    rm -f /tmp/fivem_direct.log
+}
+
 clear
 echo -e "${BLUE}╔═══════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║                                                           ║${NC}"
@@ -254,47 +428,39 @@ EOL
   echo -e "\n${GREEN}[3/3] Update abgeschlossen...${NC}"
 fi
 
-# Starte FiveM-Server
-echo -e "\n${GREEN}FiveM Server wird gestartet...${NC}"
-systemctl start fivem.service
-
 # IP-Adresse abrufen
 SERVER_IP=$(hostname -I | cut -d' ' -f1)
 
-# Warte auf TxAdmin-Pin
-echo -e "${YELLOW}Warte auf TxAdmin-Initialisierung...${NC}"
-sleep 15
+# PIN-Erfassung
+echo -e "\n${GREEN}Starte TxAdmin und erfasse PIN...${NC}"
 
-# Versuche, den TxAdmin-Pin aus den Logs zu extrahieren
-TXADMIN_PIN=""
+# Erfasse PIN
+TXADMIN_PIN_RESULT=$(capture_txadmin_pin)
+PIN_STATUS=$?
 
-# Prüfe, ob TxAdmin bereits eingerichtet ist (kein Pin erforderlich)
-if [ -f "/opt/fivem/txData/default/config.json" ]; then
-  echo -e "${GREEN}TxAdmin ist bereits konfiguriert, kein neuer PIN erforderlich.${NC}"
-  TXADMIN_CONFIGURED=true
-else
-  TXADMIN_CONFIGURED=false
-  
-  echo -e "${YELLOW}Suche nach TxAdmin-Pin in den Logs...${NC}"
-  
-  # Versuche, den Pin aus den Logs zu extrahieren
-  if [ -f "/opt/fivem/txData/default/logs/admin.log" ]; then
-    TXADMIN_PIN=$(grep -o "PIN: [0-9]\{4\}" /opt/fivem/txData/default/logs/admin.log | tail -1 | cut -d' ' -f2)
-  fi
-  
-  # Wenn kein Pin gefunden wurde, versuche es mit einem anderen Ansatz
-  if [ -z "$TXADMIN_PIN" ]; then
-    echo -e "${YELLOW}Überprüfe Server-Logs nach PIN...${NC}"
-    if [ -f "/opt/fivem/server.log" ]; then
-      TXADMIN_PIN=$(grep -o "PIN: [0-9]\{4\}" /opt/fivem/server.log | tail -1 | cut -d' ' -f2)
-    fi
-  fi
-  
-  # Wenn immer noch kein Pin gefunden wurde, versuche es mit einem anderen Ansatz
-  if [ -z "$TXADMIN_PIN" ]; then
-    echo -e "${YELLOW}Überprüfe alle Log-Dateien nach PIN...${NC}"
-    TXADMIN_PIN=$(find /opt/fivem -type f -name "*.log" -exec grep -l "PIN: [0-9]\{4\}" {} \; | xargs grep -o "PIN: [0-9]\{4\}" | tail -1 | cut -d' ' -f2)
-  fi
+case $PIN_STATUS in
+    0)
+        TXADMIN_PIN="$TXADMIN_PIN_RESULT"
+        TXADMIN_CONFIGURED=false
+        echo -e "${GREEN}PIN erfolgreich erfasst: $TXADMIN_PIN${NC}"
+        ;;
+    2)
+        TXADMIN_CONFIGURED=true
+        TXADMIN_PIN=""
+        ;;
+    *)
+        TXADMIN_CONFIGURED=false
+        TXADMIN_PIN=""
+        echo -e "${RED}PIN konnte nicht erfasst werden!${NC}"
+        echo -e "${YELLOW}Bitte starten Sie den Server manuell und suchen Sie nach dem PIN:${NC}"
+        echo -e "${BLUE}journalctl -u fivem.service -f | grep PIN${NC}"
+        ;;
+esac
+
+# Stelle sicher, dass der Service läuft
+if ! systemctl is-active --quiet fivem.service; then
+    echo -e "${YELLOW}Starte FiveM-Service...${NC}"
+    systemctl start fivem.service
 fi
 
 # Zusammenfassung anzeigen
@@ -309,10 +475,9 @@ if [ "$action_choice" -eq "1" ]; then
     echo -e "  - TxAdmin PIN: ${TXADMIN_PIN}"
   else
     echo -e "  - TxAdmin PIN: ${RED}Konnte nicht automatisch ermittelt werden.${NC}"
-    echo -e "    Bitte überprüfen Sie die Logs mit einem der folgenden Befehle:"
-    echo -e "    ${YELLOW}cat /opt/fivem/txData/default/logs/admin.log | grep PIN${NC}"
-    echo -e "    ${YELLOW}cat /opt/fivem/server.log | grep PIN${NC}"
-    echo -e "    ${YELLOW}find /opt/fivem -type f -name \"*.log\" -exec grep -l \"PIN:\" {} \\; | xargs cat | grep PIN${NC}"
+    echo -e "    Für sofortige PIN-Erfassung führen Sie aus:"
+    echo -e "    ${YELLOW}# Stoppe den Service und erfasse PIN sofort:${NC}"
+    echo -e "    ${BLUE}systemctl stop fivem.service && cd /opt/fivem && ./run.sh +set serverProfile default +set txAdminPort 40120${NC}"
   fi
   echo -e "  - phpMyAdmin: http://${SERVER_IP}/phpmyadmin"
   echo -e "  - MySQL/MariaDB:"
@@ -325,9 +490,8 @@ else
   elif [ -n "$TXADMIN_PIN" ]; then
     echo -e "  - TxAdmin PIN: ${TXADMIN_PIN} (falls TxAdmin neu initialisiert wurde)"
   else
-    echo -e "  - Falls TxAdmin neu initialisiert wurde, überprüfen Sie die Logs nach dem PIN:"
-    echo -e "    ${YELLOW}cat /opt/fivem/txData/default/logs/admin.log | grep PIN${NC}"
-    echo -e "    ${YELLOW}cat /opt/fivem/server.log | grep PIN${NC}"
+    echo -e "  - Falls TxAdmin neu initialisiert wurde, für sofortigen PIN:"
+    echo -e "    ${BLUE}systemctl stop fivem.service && cd /opt/fivem && ./run.sh +set serverProfile default +set txAdminPort 40120${NC}"
   fi
   echo -e "  - FiveM wurde erfolgreich aktualisiert."
 fi
@@ -340,6 +504,8 @@ echo -e "     - Status prüfen: systemctl status fivem"
 echo -e "     - Neustarten: systemctl restart fivem"
 echo -e "     - Stoppen: systemctl stop fivem"
 echo -e "     - Starten: systemctl start fivem"
+echo -e "  3. Für sofortige PIN-Erfassung bei Problemen:"
+echo -e "     ${BLUE}systemctl stop fivem.service && cd /opt/fivem && timeout 30 ./run.sh +set serverProfile default +set txAdminPort 40120 | grep PIN${NC}"
 echo ""
 echo -e "${GREEN}Viel Spaß mit Ihrem FiveM-Server!${NC}"
 
@@ -354,3 +520,6 @@ if [ "$action_choice" -eq "1" ]; then
   echo -e "MySQL/MariaDB Passwort: ${MYSQL_ROOT_PASSWORD}" >> /root/fivem_credentials.txt
   echo -e "\n${GREEN}Zugangsdaten wurden in /root/fivem_credentials.txt gespeichert.${NC}"
 fi
+
+# Für sofortige PIN-Erfassung bei Bedarf entkommentieren:
+# show_pin_immediately
