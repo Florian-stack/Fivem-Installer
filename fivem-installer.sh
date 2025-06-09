@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# FiveM Server mit TxAdmin und phpMyAdmin Automatisches Installationsscript
+# FiveM Server mit TxAdmin und phpMyAdmin Automatisches Installations- und Update-Script
 # Für Debian 12
 #
 
@@ -23,82 +23,62 @@ if [ ! -f /etc/debian_version ] || ! grep -q "12" /etc/debian_version; then
   exit 1
 fi
 
+# Funktion zum Generieren sicherer Passwörter
+generate_password() {
+  openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 12
+}
+
 clear
 echo -e "${BLUE}╔═══════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║                                                           ║${NC}"
-echo -e "${BLUE}║${NC}   ${GREEN}FiveM Server mit TxAdmin und phpMyAdmin - Installer${NC}     ${BLUE}║${NC}"
+echo -e "${BLUE}║${NC}   ${GREEN}FiveM Server mit TxAdmin und phpMyAdmin - Tool${NC}         ${BLUE}║${NC}"
 echo -e "${BLUE}║                                                           ║${NC}"
 echo -e "${BLUE}╚═══════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${YELLOW}Dieses Script installiert:${NC}"
-echo -e "  - FiveM Server mit TxAdmin"
-echo -e "  - MySQL/MariaDB"
-echo -e "  - phpMyAdmin"
-echo -e "  - Nginx als Webserver"
-echo -e "  - UFW Firewall"
-echo ""
-echo -e "${RED}WICHTIG: Dieses Script ist für eine frische Debian 12 Installation gedacht.${NC}"
+echo -e "${YELLOW}Dieses Script kann:${NC}"
+echo -e "  1) Einen neuen FiveM Server mit TxAdmin installieren"
+echo -e "  2) Einen bestehenden FiveM Server aktualisieren"
 echo ""
 
-# Benutzer nach Bestätigung fragen
-read -p "Möchten Sie fortfahren? (j/n): " choice
-if [[ ! "$choice" =~ ^[jJ]$ ]]; then
-  echo -e "${RED}Installation abgebrochen.${NC}"
+# Auswahl der Aktion
+read -p "Bitte wählen Sie eine Option (1 oder 2): " action_choice
+if [[ ! "$action_choice" =~ ^[1-2]$ ]]; then
+  echo -e "${RED}Ungültige Auswahl. Das Script wird beendet.${NC}"
   exit 1
 fi
 
-# Benutzerinformationen sammeln
-echo ""
-echo -e "${YELLOW}Bitte geben Sie die folgenden Informationen ein:${NC}"
-read -p "FiveM Server Name: " SERVER_NAME
-read -p "FiveM Lizenzschlüssel (von keymaster.fivem.net): " LICENSE_KEY
-read -p "MySQL Root Passwort: " MYSQL_ROOT_PASSWORD
-read -p "phpMyAdmin Benutzername: " PMA_USERNAME
-read -p "phpMyAdmin Passwort: " PMA_PASSWORD
+# Passwörter generieren
+MYSQL_ROOT_PASSWORD=$(generate_password)
+PMA_PASSWORD=$(generate_password)
+PMA_USERNAME="root"
 
-# Bestätigung
-echo ""
-echo -e "${YELLOW}Zusammenfassung:${NC}"
-echo -e "  - Server Name: ${SERVER_NAME}"
-echo -e "  - MySQL Root Passwort: ${MYSQL_ROOT_PASSWORD}"
-echo -e "  - phpMyAdmin Benutzer: ${PMA_USERNAME}"
-echo ""
-read -p "Sind diese Informationen korrekt? (j/n): " confirm
-if [[ ! "$confirm" =~ ^[jJ]$ ]]; then
-  echo -e "${RED}Installation abgebrochen.${NC}"
-  exit 1
-fi
+# Installation
+if [ "$action_choice" -eq "1" ]; then
+  echo -e "\n${GREEN}[1/6] System wird aktualisiert...${NC}"
+  apt update && apt upgrade -y
 
-# System aktualisieren
-echo -e "\n${GREEN}[1/7] System wird aktualisiert...${NC}"
-apt update && apt upgrade -y
+  echo -e "\n${GREEN}[2/6] Benötigte Pakete werden installiert...${NC}"
+  apt install -y wget git curl xz-utils screen ufw nginx mariadb-server php php-fpm php-mysql php-curl php-gd php-mbstring php-xml php-zip unzip
 
-# Benötigte Pakete installieren
-echo -e "\n${GREEN}[2/7] Benötigte Pakete werden installiert...${NC}"
-apt install -y wget git curl xz-utils screen ufw nginx mariadb-server php php-fpm php-mysql php-curl php-gd php-mbstring php-xml php-zip unzip
+  echo -e "\n${GREEN}[3/6] MySQL/MariaDB wird konfiguriert...${NC}"
+  mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';"
+  mysql -e "FLUSH PRIVILEGES;"
 
-# MySQL/MariaDB konfigurieren
-echo -e "\n${GREEN}[3/7] MySQL/MariaDB wird konfiguriert...${NC}"
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';"
-mysql -e "CREATE USER '${PMA_USERNAME}'@'localhost' IDENTIFIED BY '${PMA_PASSWORD}';"
-mysql -e "GRANT ALL PRIVILEGES ON *.* TO '${PMA_USERNAME}'@'localhost' WITH GRANT OPTION;"
-mysql -e "FLUSH PRIVILEGES;"
+  echo -e "\n${GREEN}[4/6] phpMyAdmin wird installiert...${NC}"
+  mkdir -p /var/www/html/phpmyadmin
+  cd /tmp
+  # Neueste Version von phpMyAdmin herunterladen
+  wget https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.zip
+  unzip phpMyAdmin-5.2.1-all-languages.zip
+  cp -a phpMyAdmin-5.2.1-all-languages/* /var/www/html/phpmyadmin/
+  rm -rf phpMyAdmin-5.2.1-all-languages.zip phpMyAdmin-5.2.1-all-languages
+  cp /var/www/html/phpmyadmin/config.sample.inc.php /var/www/html/phpmyadmin/config.inc.php
+  BLOWFISH_SECRET=$(openssl rand -base64 32)
+  sed -i "s/\$cfg\['blowfish_secret'\] = ''/\$cfg\['blowfish_secret'\] = '${BLOWFISH_SECRET}'/" /var/www/html/phpmyadmin/config.inc.php
+  chown -R www-data:www-data /var/www/html/phpmyadmin
 
-# phpMyAdmin installieren
-echo -e "\n${GREEN}[4/7] phpMyAdmin wird installiert...${NC}"
-mkdir -p /var/www/html/phpmyadmin
-cd /tmp
-wget https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.zip
-unzip phpMyAdmin-5.2.1-all-languages.zip
-cp -a phpMyAdmin-5.2.1-all-languages/* /var/www/html/phpmyadmin/
-rm -rf phpMyAdmin-5.2.1-all-languages.zip phpMyAdmin-5.2.1-all-languages
-cp /var/www/html/phpmyadmin/config.sample.inc.php /var/www/html/phpmyadmin/config.inc.php
-BLOWFISH_SECRET=$(openssl rand -base64 32)
-sed -i "s/\$cfg\['blowfish_secret'\] = ''/\$cfg\['blowfish_secret'\] = '${BLOWFISH_SECRET}'/" /var/www/html/phpmyadmin/config.inc.php
-chown -R www-data:www-data /var/www/html/phpmyadmin
-
-# Nginx für phpMyAdmin konfigurieren
-cat > /etc/nginx/sites-available/default << EOL
+  # Nginx für phpMyAdmin konfigurieren
+  cat > /etc/nginx/sites-available/default << EOL
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -140,21 +120,66 @@ server {
 }
 EOL
 
-systemctl restart nginx
+  systemctl restart nginx
+fi
 
-# FiveM mit TxAdmin installieren
-echo -e "\n${GREEN}[5/7] FiveM mit TxAdmin wird installiert...${NC}"
-mkdir -p /opt/fivem
-cd /opt/fivem
-wget -q --show-progress https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/6683-9729577be50de537692c3a19e86365a5e0f99a54/fx.tar.xz
+# FiveM mit TxAdmin installieren oder aktualisieren
+if [ "$action_choice" -eq "1" ]; then
+  echo -e "\n${GREEN}[5/6] FiveM mit TxAdmin wird installiert...${NC}"
+  mkdir -p /opt/fivem
+  cd /opt/fivem
+else
+  echo -e "\n${GREEN}[1/3] FiveM mit TxAdmin wird aktualisiert...${NC}"
+  # Stoppe den FiveM-Service, falls er läuft
+  if systemctl is-active --quiet fivem.service; then
+    systemctl stop fivem.service
+    echo -e "${YELLOW}FiveM-Service wurde gestoppt für das Update.${NC}"
+  fi
+  
+  # Sichere die aktuellen Daten
+  if [ -d "/opt/fivem" ]; then
+    echo -e "${YELLOW}Sichere wichtige Daten vor dem Update...${NC}"
+    # Sichere nur die wichtigen Daten, nicht die gesamte Installation
+    if [ -d "/opt/fivem/server-data" ]; then
+      mkdir -p /opt/fivem_backup
+      cp -r /opt/fivem/server-data /opt/fivem_backup/
+      echo -e "${GREEN}Server-Daten wurden gesichert nach /opt/fivem_backup/server-data${NC}"
+    fi
+  else
+    mkdir -p /opt/fivem
+  fi
+  
+  cd /opt/fivem
+  # Entferne alte FiveM-Dateien, aber behalte server-data
+  find . -maxdepth 1 -not -name "server-data" -not -name "." -not -name ".." -exec rm -rf {} \;
+  echo -e "${GREEN}Alte FiveM-Dateien wurden entfernt.${NC}"
+fi
+
+# Aktuelle FiveM-Version herunterladen
+echo -e "${YELLOW}Neueste FiveM-Version wird heruntergeladen...${NC}"
+LATEST_ARTIFACT_URL=$(curl -s https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ | grep -o 'href="[^"]*"' | grep -o '".*"' | tr -d '"' | grep -v '\.\.' | sort -r | head -n 1)
+LATEST_ARTIFACT_FULL_URL="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/${LATEST_ARTIFACT_URL}fx.tar.xz"
+echo -e "${GREEN}Neueste Version gefunden: ${LATEST_ARTIFACT_URL}${NC}"
+echo -e "${GREEN}Download-URL: ${LATEST_ARTIFACT_FULL_URL}${NC}"
+
+wget -q --show-progress "${LATEST_ARTIFACT_FULL_URL}" -O fx.tar.xz
+if [ $? -ne 0 ]; then
+  echo -e "${RED}Fehler beim Herunterladen der neuesten FiveM-Version.${NC}"
+  echo -e "${YELLOW}Versuche alternative Download-Methode...${NC}"
+  # Fallback auf bekannte stabile Version
+  wget -q --show-progress "https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/latest/fx.tar.xz" -O fx.tar.xz
+fi
+
 tar xf fx.tar.xz
 rm fx.tar.xz
 
 # TxAdmin Setup vorbereiten
 mkdir -p /opt/fivem/server-data
 
-# Systemd Service für FiveM erstellen
-cat > /etc/systemd/system/fivem.service << EOL
+# Nur bei Neuinstallation
+if [ "$action_choice" -eq "1" ]; then
+  # Systemd Service für FiveM erstellen
+  cat > /etc/systemd/system/fivem.service << EOL
 [Unit]
 Description=FiveM Server with TxAdmin
 After=network.target
@@ -171,42 +196,118 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOL
 
-systemctl daemon-reload
-systemctl enable fivem.service
+  systemctl daemon-reload
+  systemctl enable fivem.service
 
-# Firewall konfigurieren
-echo -e "\n${GREEN}[6/7] Firewall wird konfiguriert...${NC}"
-ufw allow 22/tcp
-ufw allow 80/tcp
-ufw allow 30120/tcp
-ufw allow 30120/udp
-ufw allow 40120/tcp
-ufw --force enable
+  # Firewall konfigurieren
+  echo -e "\n${GREEN}[6/6] Firewall wird konfiguriert...${NC}"
+  ufw allow 22/tcp
+  ufw allow 80/tcp
+  ufw allow 30120/tcp
+  ufw allow 30120/udp
+  ufw allow 40120/tcp
+  ufw --force enable
+else
+  echo -e "\n${GREEN}[2/3] Konfiguration wird überprüft...${NC}"
+  # Stelle sicher, dass der Service korrekt konfiguriert ist
+  if [ ! -f "/etc/systemd/system/fivem.service" ]; then
+    echo -e "${YELLOW}FiveM-Service wird neu konfiguriert...${NC}"
+    cat > /etc/systemd/system/fivem.service << EOL
+[Unit]
+Description=FiveM Server with TxAdmin
+After=network.target
 
-# Abschluss und Zusammenfassung
-echo -e "\n${GREEN}[7/7] FiveM Server wird gestartet...${NC}"
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/fivem
+ExecStart=/opt/fivem/run.sh +set serverProfile default +set txAdminPort 40120
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOL
+    systemctl daemon-reload
+    systemctl enable fivem.service
+  fi
+  
+  echo -e "\n${GREEN}[3/3] Update abgeschlossen...${NC}"
+fi
+
+# Starte FiveM-Server
+echo -e "\n${GREEN}FiveM Server wird gestartet...${NC}"
 systemctl start fivem.service
+
+# Warte auf TxAdmin-Pin
+echo -e "${YELLOW}Warte auf TxAdmin-Initialisierung und Pin-Generierung...${NC}"
+sleep 10
+
+# Versuche, den TxAdmin-Pin aus den Logs zu extrahieren
+TXADMIN_PIN=""
+ATTEMPTS=0
+MAX_ATTEMPTS=12  # 2 Minuten (12 * 10 Sekunden)
+
+while [ -z "$TXADMIN_PIN" ] && [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
+  ATTEMPTS=$((ATTEMPTS+1))
+  echo -e "${YELLOW}Suche nach TxAdmin-Pin (Versuch $ATTEMPTS/$MAX_ATTEMPTS)...${NC}"
+  
+  # Versuche, den Pin aus den Logs zu extrahieren
+  if [ -f "/opt/fivem/txData/default/logs/admin.log" ]; then
+    TXADMIN_PIN=$(grep -o "PIN: [0-9]\{4\}" /opt/fivem/txData/default/logs/admin.log | tail -1 | cut -d' ' -f2)
+  fi
+  
+  if [ -z "$TXADMIN_PIN" ]; then
+    sleep 10
+  fi
+done
 
 # IP-Adresse abrufen
 SERVER_IP=$(hostname -I | cut -d' ' -f1)
 
-echo -e "\n${GREEN}Installation abgeschlossen!${NC}"
+# Zusammenfassung anzeigen
+echo -e "\n${GREEN}Vorgang abgeschlossen!${NC}"
 echo -e "\n${YELLOW}Zugriffsdaten:${NC}"
-echo -e "  - TxAdmin: http://${SERVER_IP}:40120"
-echo -e "  - phpMyAdmin: http://${SERVER_IP}/phpmyadmin"
-echo -e "  - MySQL/MariaDB:"
-echo -e "    * Benutzername: ${PMA_USERNAME}"
-echo -e "    * Passwort: ${PMA_PASSWORD}"
-echo -e "    * Root-Passwort: ${MYSQL_ROOT_PASSWORD}"
+
+if [ "$action_choice" -eq "1" ]; then
+  echo -e "  - TxAdmin: http://${SERVER_IP}:40120"
+  if [ -n "$TXADMIN_PIN" ]; then
+    echo -e "  - TxAdmin PIN: ${TXADMIN_PIN}"
+  else
+    echo -e "  - TxAdmin PIN: ${RED}Konnte nicht automatisch ermittelt werden.${NC}"
+    echo -e "    Bitte überprüfen Sie die Logs mit: ${YELLOW}cat /opt/fivem/txData/default/logs/admin.log | grep PIN${NC}"
+  fi
+  echo -e "  - phpMyAdmin: http://${SERVER_IP}/phpmyadmin"
+  echo -e "  - MySQL/MariaDB:"
+  echo -e "    * Benutzername: ${PMA_USERNAME}"
+  echo -e "    * Passwort: ${MYSQL_ROOT_PASSWORD}"
+else
+  echo -e "  - TxAdmin: http://${SERVER_IP}:40120"
+  if [ -n "$TXADMIN_PIN" ]; then
+    echo -e "  - TxAdmin PIN: ${TXADMIN_PIN} (falls TxAdmin neu initialisiert wurde)"
+  fi
+  echo -e "  - FiveM wurde erfolgreich aktualisiert."
+fi
+
 echo ""
 echo -e "${YELLOW}Wichtige Informationen:${NC}"
 echo -e "  1. Richten Sie Ihren FiveM-Server über das TxAdmin-Panel ein."
-echo -e "  2. Verwenden Sie Ihren FiveM-Lizenzschlüssel: ${LICENSE_KEY}"
-echo -e "  3. Für die Serverkonfiguration wird empfohlen, den Server-Namen zu verwenden: ${SERVER_NAME}"
-echo -e "  4. Der FiveM-Server läuft als Systemdienst. Verwenden Sie folgende Befehle zur Steuerung:"
+echo -e "  2. Der FiveM-Server läuft als Systemdienst. Verwenden Sie folgende Befehle zur Steuerung:"
 echo -e "     - Status prüfen: systemctl status fivem"
 echo -e "     - Neustarten: systemctl restart fivem"
 echo -e "     - Stoppen: systemctl stop fivem"
 echo -e "     - Starten: systemctl start fivem"
 echo ""
-echo -e "${GREEN}Viel Spaß mit Ihrem neuen FiveM-Server!${NC}"
+echo -e "${GREEN}Viel Spaß mit Ihrem FiveM-Server!${NC}"
+
+# Speichere die Zugangsdaten in einer Datei
+if [ "$action_choice" -eq "1" ]; then
+  echo -e "TxAdmin: http://${SERVER_IP}:40120" > /root/fivem_credentials.txt
+  if [ -n "$TXADMIN_PIN" ]; then
+    echo -e "TxAdmin PIN: ${TXADMIN_PIN}" >> /root/fivem_credentials.txt
+  fi
+  echo -e "phpMyAdmin: http://${SERVER_IP}/phpmyadmin" >> /root/fivem_credentials.txt
+  echo -e "MySQL/MariaDB Benutzername: ${PMA_USERNAME}" >> /root/fivem_credentials.txt
+  echo -e "MySQL/MariaDB Passwort: ${MYSQL_ROOT_PASSWORD}" >> /root/fivem_credentials.txt
+  echo -e "\n${GREEN}Zugangsdaten wurden in /root/fivem_credentials.txt gespeichert.${NC}"
+fi
