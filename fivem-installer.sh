@@ -157,20 +157,31 @@ fi
 
 # Aktuelle FiveM-Version herunterladen
 echo -e "${YELLOW}Neueste FiveM-Version wird heruntergeladen...${NC}"
-LATEST_ARTIFACT_URL=$(curl -s https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ | grep -o 'href="[^"]*"' | grep -o '".*"' | tr -d '"' | grep -v '\.\.' | sort -r | head -n 1)
-LATEST_ARTIFACT_FULL_URL="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/${LATEST_ARTIFACT_URL}fx.tar.xz"
-echo -e "${GREEN}Neueste Version gefunden: ${LATEST_ARTIFACT_URL}${NC}"
-echo -e "${GREEN}Download-URL: ${LATEST_ARTIFACT_FULL_URL}${NC}"
+# Direkt die neueste stabile Version verwenden, anstatt zu versuchen, die neueste zu finden
+echo -e "${GREEN}Verwende die neueste stabile Version von FiveM...${NC}"
+wget -q --show-progress "https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/latest/fx.tar.xz" -O fx.tar.xz
 
-wget -q --show-progress "${LATEST_ARTIFACT_FULL_URL}" -O fx.tar.xz
-if [ $? -ne 0 ]; then
-  echo -e "${RED}Fehler beim Herunterladen der neuesten FiveM-Version.${NC}"
+# Überprüfen, ob der Download erfolgreich war
+if [ $? -ne 0 ] || [ ! -s fx.tar.xz ]; then
+  echo -e "${RED}Fehler beim Herunterladen der FiveM-Version.${NC}"
   echo -e "${YELLOW}Versuche alternative Download-Methode...${NC}"
   # Fallback auf bekannte stabile Version
-  wget -q --show-progress "https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/latest/fx.tar.xz" -O fx.tar.xz
+  wget -q --show-progress "https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/6683-9729577be50de537692c3a19e86365a5e0f99a54/fx.tar.xz" -O fx.tar.xz
+  
+  # Erneut überprüfen
+  if [ $? -ne 0 ] || [ ! -s fx.tar.xz ]; then
+    echo -e "${RED}Fehler beim Herunterladen der FiveM-Version. Bitte überprüfen Sie Ihre Internetverbindung oder versuchen Sie es später erneut.${NC}"
+    exit 1
+  fi
 fi
 
+echo -e "${GREEN}Entpacke FiveM...${NC}"
 tar xf fx.tar.xz
+if [ $? -ne 0 ]; then
+  echo -e "${RED}Fehler beim Entpacken der FiveM-Version. Die heruntergeladene Datei könnte beschädigt sein.${NC}"
+  exit 1
+fi
+
 rm fx.tar.xz
 
 # TxAdmin Setup vorbereiten
