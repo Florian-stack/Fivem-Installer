@@ -297,7 +297,7 @@ EOF
         echo -e "${red}To view ${reset}${blue}Live Console${reset}${red}: ${reset}${bold}sh $dir/attach.sh${reset}"
 
         echo -e "\n${green}TxAdmin Web Interface: ${reset}${blue}${txadmin}${reset}"
-        echo -e "${green}Pin: ${reset}${blue}${pin:(-4)}${reset}${green} (use within 5 minutes!)${reset}"
+        echo -e "${green}Pin: ${reset}${blue}$(echo "$pin" | tail -c 5)${reset}${green} (use within 5 minutes!)${reset}"
         echo -e "\n${green}Server Data Path: ${reset}${blue}$dir/server-data${reset}"
 
         if [[ "$install_phpmyadmin" == "true" ]]; then
